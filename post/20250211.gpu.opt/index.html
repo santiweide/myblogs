@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en"><meta charset="utf-8"><meta name="generator" content="Hugo 0.133.0"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="supported-color-schemes" content="light dark"><title>快速诊断GPU性能瓶颈&nbsp;&ndash;&nbsp;santiweide&#39;s Blog</title><link rel="stylesheet" href="/css/core.min.003a667cf21024ef30f2985fb57c9bd6f6873cf899ee14e9302e68e9f04b681df9440cec4ebdaa101dca533a262c242f.css" integrity="sha384-ADpmfPIQJO8w8phftXyb1vaHPPiZ7hTpMC5o6fBLaB35RAzsTr2qEB3KUzomLCQv"><meta name="twitter:card" content="summary" />
+<meta name="twitter:title" content="快速诊断GPU性能瓶颈" /><body><section id="header">
+    <div class="header wrap"><span class="header left-side"><a class="site home" href="/"><span class="site name">santiweide's Blog</span></a></span>
+        <span class="header right-side"><div class="nav wrap"><nav class="nav"><a class="nav item" href="/tags/">Tags</a><a class="nav item" href="/about">About</a><a class="nav item" href="/friend">友链</a><a class="nav item" href="https://gohugo%2eio/"target="_blank" rel="noopener noreferrer">Hugo</a></nav></div></span></div><div class="site slogan"><span class="title">露の世は露の世ながらさりながら</span></div></section><section id="content"><div class="article-container"><section class="article header">
+    <h1 class="article title">快速诊断GPU性能瓶颈</h1><p class="article date">Tuesday, February 11, 2025</p></section><article class="article markdown-body"><p>GPU性能瓶颈主要分为3类：Latency Bound 延迟平静, Math Bound计算平静, Memory Bound 内存瓶颈。</p>
+<h3 id="1-诊断步骤">1 诊断步骤：</h3>
+<p><strong>1.1 评估硬件参数</strong></p>
+<ul>
+<li>GPU SM数量，比如 A100～108， V100～80</li>
+<li>GPU 算力-带宽比（ops:bytes）计算GPU算力（TFLOPS）和显存带宽的比值（TB/s），比如：A100（FP16）算力312 TFLOPS，带宽1.5TB/s,ops:bytes=208 FLOP/Byte</li>
+</ul>
+<p><strong>1.2 评估计算算法Arithmetic Intensity</strong></p>
+<ul>
+<li>即算法每读取1Byte数据课执行的浮点操作数（FLOP/Byte）</li>
+<li>例子：矩阵乘法（GEMM）的Arithmetic Intensity一般较高，逐元素操作的算法（比如激活函数）一般较低</li>
+<li>后果：
+<ul>
+<li>GPU 算力不足以处理高计算密度任务（如大矩阵乘法），性能受限于 Tensor/CUDA Core；</li>
+<li>显存带宽不足以支持低计算密度任务（如小批量推理），性能受限于数据搬运速度。</li>
+</ul>
+</li>
+</ul>
+<p><strong>1.3 评估并发是否充分</strong></p>
+<ul>
+<li>条件1: Thread Block数量&gt;=4xSM数量</li>
+<li>条件2: 每个Thread Block包括256～1024个Thread</li>
+<li>后果：SM 无法被充分占用，线程调度开销主导性能。</li>
+</ul>
+<p>即：</p>
+<div class="highlight"><pre tabindex="0" class="chroma"><code class="language-shell" data-lang="shell"><span class="line"><span class="cl">                  ┌────────────────┐
+</span></span><span class="line"><span class="cl">                  │ 并行性是否充足？ │
+</span></span><span class="line"><span class="cl">                  └──────┬─────────┘
+</span></span><span class="line"><span class="cl">                         │
+</span></span><span class="line"><span class="cl">           No ┌──────────┘ ┌──────────Yes
+</span></span><span class="line"><span class="cl">              ▼            ▼
+</span></span><span class="line"><span class="cl">      ┌─────────────┐  ┌─────────────────────┐
+</span></span><span class="line"><span class="cl">      │ 延迟瓶颈     │  │ 算术强度 &gt; ops:bytes? │
+</span></span><span class="line"><span class="cl">      └─────────────┘  └──────┬──────────────┘
+</span></span><span class="line"><span class="cl">                               │
+</span></span><span class="line"><span class="cl">                      Yes ┌────┘ ┌────No
+</span></span><span class="line"><span class="cl">                          ▼      ▼
+</span></span><span class="line"><span class="cl">                   ┌──────────┐ ┌──────────┐
+</span></span><span class="line"><span class="cl">                   │ 计算瓶颈 │ │ 内存瓶颈 │
+</span></span><span class="line"><span class="cl">                   └──────────┘ └──────────┘
+</span></span></code></pre></div><h3 id="2-优化方向">2 优化方向</h3>
+<p><strong>Latency Bound</strong></p>
+<ul>
+<li>目标：增加并行度</li>
+<li>方法：
+<ul>
+<li>increase Batch Size，或合并独立任务</li>
+<li>调整ThreadBlock大小，增加ThreadBlock数量</li>
+</ul>
+</li>
+</ul>
+<p><strong>Math Bound</strong></p>
+<ul>
+<li>目标：提升计算效率</li>
+<li>方法：
+<ul>
+<li>调整矩阵维度，以启用Tensor Core（比如FP16对其8）</li>
+<li>调整Tile Size（分块策略）或者mix precision（混合精度）</li>
+</ul>
+</li>
+</ul>
+<p><strong>Memory Bound</strong></p>
+<ul>
+<li>目标：减小数据搬运量</li>
+<li>方法：
+<ul>
+<li>优化访存模式（合并访存、共享内存访存）</li>
+<li>降低数据精度（FP16/BF16）或启用稀疏算法</li>
+</ul>
+</li>
+</ul>
+</article>
+</div>
+<div class="article bottom"><section class="article navigation"><p><a class="link" href="/post/%E7%88%B1%E6%83%85%E4%B8%87%E5%B2%81-%E8%94%A1%E6%98%8E%E4%BA%AE/"><span class="iconfont icon-article"></span>爱情万岁 蔡明亮</a></p></section></div></section><section id="footer"><div class="footer-wrap">
+    <p class="copyright">©2019 Notepadium.</p>
+    <p class="powerby"><span>Powered&nbsp;by&nbsp;</span><a href="https://gohugo.io" 
+        target="_blank" rel="noopener noreferrer">Hugo</a><span>&nbsp;&amp;&nbsp;</span><a href="https://themes.gohugo.io/hugo-notepadium/" 
+        target="_blank" rel="noopener noreferrer">Notepadium</a>
+<a href='https://ipv6-test.com/validate.php?url=referer'
+  ><img src='https://ipv6-test.com/button-ipv6-80x15.png' 
+        alt='ipv6 ready' title='ipv6 ready' border='0' 
+/></a>
+</p></div></section>
+  
+
+</body>
+
+</html>
